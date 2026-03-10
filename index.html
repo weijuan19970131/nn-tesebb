@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>图片深度取证分析器 (V2.6) - 稳定部署版</title>
+    <!-- 第三方库引用 -->
+    <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .forensic-canvas { cursor: crosshair; image-rendering: pixelated; }
+        .magnifier {
+            position: absolute;
+            border: 2px solid #3b82f6;
+            border-radius: 4px;
+            pointer-events: none;
+            display: none;
+            z-index: 50;
+            background-repeat: no-repeat;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            background-color: #000;
+        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        canvas { max-width: 100%; height: auto !important; }
+        @keyframes progress-animation {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+        .animate-progress { animation: progress-animation 2s infinite linear; }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen font-sans text-gray-900">
+
+    <div class="max-w-7xl mx-auto py-10 px-4">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800 tracking-tight">图片深度取证分析器 (V2.6)</h1>
+            <p class="text-gray-600 mt-2">部署状态：<span class="text-green-600 font-bold">已上线</span> | 资料更新点：JS 内部数组</p>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <!-- 左侧：工作区 -->
+            <div class="lg:col-span-6 space-y-4">
+                <div id="dropZone" class="border-4 border-dashed border-gray-300 rounded-2xl p-8 text-center transition-all cursor-pointer hover:border-blue-400 bg-white shadow-sm">
+                    <div class="bg-blue-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-500">
+                        <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                    </div>
+                    <p class="text-gray-700 font-bold">点击、拖拽或粘贴图片</p>
+                    <p class="text-xs text-gray-400 mt-2">系统将自动审计元数据与像素特征</p>
+                    <input type="file" id="fileInput" class="hidden" accept="image/jpeg,image/png">
+                </div>
+
+                <div id="previewCard" class="hidden bg-white p-4 rounded-2xl shadow-sm border border-gray-100 sticky top-4">
+                    <div class="flex justify-between items-center mb-3">
+                        <h3 class="text-xs font-bold text-gray-400 uppercase">取证预览</h3>
+                        <div class="flex gap-2">
+                            <button id="resetAnalysis" class="text-[10px] bg-gray-100 px-3 py-1 rounded font-bold">重置</button>
+                            <button id="autoScanBtn" class="text-[10px] bg-red-600 text-white px-3 py-1 rounded font-bold">重新扫描</button>
+                        </div>
+                    </div>
+                    <div class="relative overflow-hidden bg-black rounded-lg">
+                        <canvas id="imgCanvas" class="forensic-canvas w-full"></canvas>
+                        <canvas id="detectionCanvas" class="absolute top-0 left-0 w-full pointer-events-none"></canvas>
+                        <div id="magnifier" class="magnifier" style="width:160px; height:160px;"></div>
+                    </div>
+                    <div id="scanStatus" class="mt-4 p-3 bg-slate-900 rounded-lg hidden">
+                        <div class="w-full bg-gray-700 h-1 rounded-full overflow-hidden">
+                            <div class="bg-blue-500 h-full w-full animate-progress"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧：报告区 -->
+            <div class="lg:col-span-6 space-y-4">
+                <div id="analysisPanel" class="hidden bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+                    <div class="px-6 py-4 bg-slate-800 text-white flex justify-between items-center">
+                        <h2 class="font-bold text-sm">AI 智能取证报告</h2>
+                        <div id="judgmentTag" class="px-3 py-1 rounded text-[10px] font-black">等待扫描</div>
+                    </div>
+                    <div class="p-6">
+                        <div id="fixedDetectionList" class="space-y-3 mb-6"></div>
+                        <div class="bg-slate-50 p-4 rounded-xl border border-slate-100 mb-6">
+                            <h4 class="text-xs font-bold text-slate-700 mb-2">综合结论</h4>
+                            <p id="autoSummary" class="text-xs text-slate-600 leading-relaxed"></p>
+                        </div>
+                        <div id="exifPanel" class="hidden">
+                            <h4 class="text-xs font-bold text-gray-400 mb-2 uppercase">RAW METADATA</h4>
+                            <div class="max-h-[300px] overflow-y-auto rounded border border-gray-100 no-scrollbar">
+                                <table class="w-full text-[10px] text-left">
+                                    <tbody id="exifDataBody" class="divide-y divide-gray-50"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 资料更新数组：日后在此添加新关键词
+        const BLACKLIST_KEYWORDS = [
+            "PHOTOSHOP", "ADOBE", "MEITU", "PICTUREID", "THUMBNAILIMAGE", 
+            "GIMP", "CANVA", "PICSART", "AI GENERATED", "STABLE DIFFUSION", 
+            "MIDJOURNEY", "DALL-E", "WONDER", "ARTBREEDER", "RETOUCH"
+        ];
+
+        const fileInput = document.getElementById('fileInput');
+        const dropZone = document.getElementById('dropZone');
+        const imgCanvas = document.getElementById('imgCanvas');
+        const detectionCanvas = document.getElementById('detectionCanvas');
+        const ctx = imgCanvas.getContext('2d', { willReadFrequently: true });
+        const detectCtx = detectionCanvas.getContext('2d');
+        const previewCard = document.getElementById('previewCard');
+        const analysisPanel = document.getElementById('analysisPanel');
+        const fixedDetectionList = document.getElementById('fixedDetectionList');
+        const judgmentTag = document.getElementById('judgmentTag');
+        const exifDataBody = document.getElementById('exifDataBody');
+        const autoSummary = document.getElementById('autoSummary');
+        const magnifier = document.getElementById('magnifier');
+
+        let originalImg = null;
+
+        dropZone.onclick = () => fileInput.click();
+        fileInput.onchange = (e) => processFile(e.target.files[0]);
+        document.getElementById('resetAnalysis').onclick = () => location.reload();
+        document.getElementById('autoScanBtn').onclick = () => runAutoAnalysis();
+
+        // 粘贴支持
+        window.addEventListener('paste', (e) => {
+            const items = e.clipboardData.items;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf("image") !== -1) processFile(items[i].getAsFile());
+            }
+        });
+
+        function processFile(file) {
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                originalImg = new Image();
+                originalImg.onload = () => {
+                    imgCanvas.width = detectionCanvas.width = originalImg.width;
+                    imgCanvas.height = detectionCanvas.height = originalImg.height;
+                    ctx.drawImage(originalImg, 0, 0);
+                    dropZone.classList.add('hidden');
+                    previewCard.classList.remove('hidden');
+                    analysisPanel.classList.remove('hidden');
+                    analyzeMetadata(file);
+                    setTimeout(runAutoAnalysis, 500);
+                    setupMagnifier();
+                };
+                originalImg.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function analyzeMetadata(file) {
+            fixedDetectionList.innerHTML = '';
+            EXIF.getData(file, function() {
+                const exif = EXIF.getAllTags(this);
+                const exifStr = JSON.stringify(exif).toUpperCase();
+                const reader = new FileReader();
+                reader.onload = function() {
+                    const binary = new TextDecoder().decode(new Uint8Array(this.result.slice(0, 500000))).toUpperCase();
+                    let findings = [];
+                    
+                    BLACKLIST_KEYWORDS.forEach(word => {
+                        if (binary.includes(word) || exifStr.includes(word)) {
+                            findings.push(word);
+                        }
+                    });
+
+                    if (findings.length > 0) {
+                        judgmentTag.innerText = "🔴 指纹异常";
+                        judgmentTag.className = "px-3 py-1 rounded text-[10px] font-black text-white bg-red-600";
+                        const div = document.createElement('div');
+                        div.className = "p-3 bg-red-50 border-l-4 border-red-600 text-red-800 text-xs font-bold";
+                        div.innerHTML = `检出修改指纹: ${findings.join(', ')}。此图并非相机原始直出。`;
+                        fixedDetectionList.appendChild(div);
+                    } else {
+                        judgmentTag.innerText = "🟢 元数据纯净";
+                        judgmentTag.className = "px-3 py-1 rounded text-[10px] font-black text-white bg-green-600";
+                    }
+
+                    document.getElementById('exifPanel').classList.remove('hidden');
+                    exifDataBody.innerHTML = Object.entries(exif).map(([k, v]) => 
+                        `<tr><td class="p-1 font-bold border-r">${k}</td><td class="p-1 break-all">${v}</td></tr>`
+                    ).join('');
+                };
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        function runAutoAnalysis() {
+            if (!originalImg) return;
+            document.getElementById('scanStatus').classList.remove('hidden');
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = imgCanvas.width;
+            tempCanvas.height = imgCanvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(originalImg, 0, 0);
+            
+            const resavedImg = new Image();
+            resavedImg.onload = () => {
+                tempCtx.drawImage(resavedImg, 0, 0);
+                const d1 = ctx.getImageData(0, 0, imgCanvas.width, imgCanvas.height).data;
+                const d2 = tempCtx.getImageData(0, 0, imgCanvas.width, imgCanvas.height).data;
+                
+                let alertCount = 0;
+                const blockSize = 16;
+                detectCtx.clearRect(0, 0, detectionCanvas.width, detectionCanvas.height);
+                detectCtx.strokeStyle = "red";
+                detectCtx.setLineDash([4, 2]);
+
+                for (let y = 0; y < imgCanvas.height; y += blockSize) {
+                    for (let x = 0; x < imgCanvas.width; x += blockSize) {
+                        let diff = 0;
+                        for (let i = 0; i < blockSize * blockSize; i++) {
+                            const idx = ((y + Math.floor(i/blockSize)) * imgCanvas.width + (x + i%blockSize)) * 4;
+                            if (idx < d1.length) diff += Math.abs(d1[idx] - d2[idx]);
+                        }
+                        if (diff / (blockSize * blockSize) > 15) {
+                            detectCtx.strokeRect(x, y, blockSize, blockSize);
+                            alertCount++;
+                        }
+                    }
+                }
+                autoSummary.innerHTML = alertCount > 0 ? 
+                    `分析完成。检出 <b class="text-red-600">${alertCount}</b> 处像素离群块。红色虚线标出了图像能量不均匀的区域，可能存在 AI 生成或后期篡改。` : 
+                    "像素分析完成，未见明显篡改痕迹。";
+                document.getElementById('scanStatus').classList.add('hidden');
+            };
+            resavedImg.src = tempCanvas.toDataURL('image/jpeg', 0.8);
+        }
+
+        function setupMagnifier() {
+            imgCanvas.onmousemove = (e) => {
+                const r = imgCanvas.getBoundingClientRect();
+                const x = e.clientX - r.left, y = e.clientY - r.top;
+                magnifier.style.display = "block";
+                magnifier.style.left = `${x + 20}px`;
+                magnifier.style.top = `${y + 20}px`;
+                magnifier.style.backgroundImage = `url(${imgCanvas.toDataURL()})`;
+                magnifier.style.backgroundSize = `${r.width * 8}px ${r.height * 8}px`;
+                magnifier.style.backgroundPosition = `-${x * 8 - 80}px -${y * 8 - 80}px`;
+            };
+            imgCanvas.onmouseleave = () => magnifier.style.display = "none";
+        }
+    </script>
+</body>
+</html>
